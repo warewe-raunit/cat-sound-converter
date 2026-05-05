@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Local/generated audio and archives
+raw/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.zip
+*.tar
+*.tar.gz
+
+# Keep curated runtime clips committed
+!curated_cat_sounds/**/*.wav
+!curated_cat_sounds/metadata.json
+
+# Logs and local tool state
+*.log
+.claude/
+
+# OS/editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
