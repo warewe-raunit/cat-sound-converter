@@ -15,6 +15,7 @@ _MIN_TS_LEN = 2048   # minimum samples needed for time_stretch
 # ---------------------------------------------------------------------------
 
 def _ensure_len(y: np.ndarray, min_len: int) -> tuple[np.ndarray, int]:
+    y = np.asarray(y, dtype=np.float32)
     orig = len(y)
     if orig < min_len:
         y = np.pad(y, (0, min_len - orig))
@@ -97,7 +98,7 @@ def shape_attack(y: np.ndarray, sr: int, attack_scale: float) -> np.ndarray:
 
 def eq_brightness(y: np.ndarray, sr: int, gain_db: float, freq: float = 3000.0) -> np.ndarray:
     """High-shelf boost/cut via a 2-pole Butterworth high-pass mix."""
-    if abs(gain_db) < 0.05:
+    if len(y) == 0 or abs(gain_db) < 0.05:
         return y
     from scipy import signal as sp
     nyq = sr / 2.0
@@ -147,6 +148,12 @@ def match_duration(
     Time-stretch y to approximate target_dur, within ±max_stretch.
     Falls back to crop/pad when stretch would be too extreme.
     """
+    target_n = max(0, int(target_dur * sr))
+    if target_n == 0:
+        return np.zeros(0, dtype=np.float32)
+    if len(y) == 0:
+        return np.zeros(target_n, dtype=np.float32)
+
     current = len(y) / sr
     if abs(current - target_dur) / (current + 1e-9) < 0.08:
         return y
@@ -155,7 +162,6 @@ def match_duration(
     clamped = float(np.clip(rate, 1.0 / max_stretch, max_stretch))
     y_s = time_stretch(y, sr, clamped)
 
-    target_n = int(target_dur * sr)
     if len(y_s) > target_n:
         return y_s[:target_n]
     if len(y_s) < target_n:
@@ -168,6 +174,8 @@ def normalize(
     target_db: float = -3.0,
     only_if_louder: bool = False,
 ) -> np.ndarray:
+    if len(y) == 0:
+        return y
     peak = np.max(np.abs(y))
     if peak < 1e-9:
         return y
@@ -179,6 +187,8 @@ def normalize(
 
 def soft_limit(y: np.ndarray, threshold: float = 0.96) -> np.ndarray:
     """Soft-knee limiter — prevents hard clipping."""
+    if len(y) == 0:
+        return y
     knee = threshold * 0.88
     over = np.abs(y) > knee
     sign = np.sign(y)

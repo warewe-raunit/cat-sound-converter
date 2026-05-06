@@ -15,10 +15,12 @@ import soundfile as sf
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
-from engine.audio_io import AudioDecodeError, load_audio, save_audio
+from engine.audio_io import AudioDecodeError, load_audio, save_audio, validate_sample_rate
 from engine.curated_dataset import CuratedDataset
+from engine.cat_interpreter import translate_cat_audio
 from engine.prosody import analyze
 from engine.renderer import render
+from engine.tts import ALLOWED_VOICES, DEFAULT_VOICE, TextToSpeechError, speak_text
 
 
 ROOT = Path(__file__).resolve().parent
@@ -46,7 +48,25 @@ def _validate_style(style: str) -> str:
     return style
 
 
+def _validate_sr(sr: int) -> int:
+    try:
+        return validate_sample_rate(sr)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _validate_tts_rate(rate: int) -> int:
+    try:
+        rate = int(rate)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="TTS rate must be an integer.") from exc
+    if rate < 80 or rate > 260:
+        raise HTTPException(status_code=400, detail="TTS rate must be between 80 and 260.")
+    return rate
+
+
 def _render_file(input_path: Path, output_path: Path, dataset: Path, style: str, sr: int) -> dict:
+    sr = _validate_sr(sr)
     try:
         y, sr = load_audio(str(input_path), sr=sr)
     except AudioDecodeError as exc:
@@ -59,14 +79,36 @@ def _render_file(input_path: Path, output_path: Path, dataset: Path, style: str,
             detail="No vocal segments found. Try a clearer or less silent input.",
         )
 
-    clips = CuratedDataset(str(dataset), sr=sr)
-    output = render(segments, clips, style=style, sr=sr, verbose=False)
-    save_audio(str(output_path), output, sr)
+    try:
+        clips = CuratedDataset(str(dataset), sr=sr)
+        output = render(segments, clips, style=style, sr=sr, verbose=False)
+        save_audio(str(output_path), output, sr)
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "input_seconds": round(len(y) / sr, 3),
         "output_seconds": round(len(output) / sr, 3),
         "segments": len(segments),
     }
+
+
+def _translate_file(input_path: Path, sr: int) -> dict:
+    sr = _validate_sr(sr)
+    try:
+        y, sr = load_audio(str(input_path), sr=sr)
+    except AudioDecodeError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+
+    try:
+        result = translate_cat_audio(y, sr)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result["segments"] == 0:
+        raise HTTPException(
+            status_code=422,
+            detail="No clear cat vocal segments found. Try a louder or cleaner recording.",
+        )
+    return result
 
 
 def _write_demo_input(path: Path, sr: int = 22050) -> None:
@@ -87,6 +129,7 @@ def _write_demo_input(path: Path, sr: int = 22050) -> None:
 def health() -> dict:
     return {
         "ok": True,
+        "features": ["audio_to_cat", "cat_audio_to_human", "cat_audio_to_human_speech"],
         "default_dataset": str(DEFAULT_DATASET),
         "dataset_exists": DEFAULT_DATASET.exists(),
     }
@@ -111,6 +154,7 @@ def index() -> str:
   </head>
   <body>
     <h1>Cat Vocalization Engine</h1>
+    <h2>Human audio to cat</h2>
     <form action="/render" method="post" enctype="multipart/form-data">
       <label>Input audio</label>
       <input name="file" type="file" accept="audio/*" required />
@@ -130,6 +174,23 @@ def index() -> str:
     <div class="row">
       <a href="/render-demo?style=natural">Render built-in demo input</a>
     </div>
+    <h2>Cat audio to human (text)</h2>
+    <form action="/translate-cat" method="post" enctype="multipart/form-data">
+      <label>Cat audio</label>
+      <input name="file" type="file" accept="audio/*" required />
+      <button type="submit">Translate to Text</button>
+    </form>
+    <h2>Cat audio to human (voice)</h2>
+    <form action="/translate-cat-speech" method="post" enctype="multipart/form-data">
+      <label>Cat audio</label>
+      <input name="file" type="file" accept="audio/*" required />
+      <label>Voice</label>
+      <select name="voice">
+        <option value="en-US-GuyNeural">Guy</option>
+        <option value="en-GB-SoniaNeural">Sonia</option>
+      </select>
+      <button type="submit">Translate to Voice</button>
+    </form>
   </body>
 </html>
 """
@@ -144,6 +205,7 @@ async def render_upload(
     sr: int = Form(22050),
 ) -> FileResponse:
     style = _validate_style(style)
+    sr = _validate_sr(sr)
     dataset_path = _dataset_path(dataset)
 
     work_dir = Path(tempfile.mkdtemp(prefix="cat_api_"))
@@ -181,6 +243,7 @@ def render_demo(
     sr: int = 22050,
 ) -> FileResponse:
     style = _validate_style(style)
+    sr = _validate_sr(sr)
     dataset_path = _dataset_path(dataset)
 
     work_dir = Path(tempfile.mkdtemp(prefix="cat_api_demo_"))
@@ -204,6 +267,76 @@ def render_demo(
         output_path,
         media_type="audio/wav",
         filename="cat_demo_output.wav",
+        headers=headers,
+        background=background_tasks,
+    )
+
+
+@app.post("/translate-cat")
+async def translate_cat_upload(
+    file: UploadFile = File(...),
+    sr: int = Form(22050),
+) -> dict:
+    sr = _validate_sr(sr)
+    work_dir = Path(tempfile.mkdtemp(prefix="cat_translate_"))
+    suffix = Path(file.filename or "input.wav").suffix or ".wav"
+    input_path = work_dir / f"input{suffix}"
+
+    try:
+        input_path.write_bytes(await file.read())
+        return _translate_file(input_path, sr)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@app.post("/translate-cat-speech")
+async def translate_cat_speech_upload(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    sr: int = Form(22050),
+    voice: str = Form(DEFAULT_VOICE),
+    tts_rate: int = Form(150),
+) -> FileResponse:
+    """Translate cat audio and return the translation as spoken English WAV."""
+    sr = _validate_sr(sr)
+    tts_rate = _validate_tts_rate(tts_rate)
+    if voice not in ALLOWED_VOICES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid voice. Use en-US-GuyNeural or en-GB-SoniaNeural.",
+        )
+
+    work_dir = Path(tempfile.mkdtemp(prefix="cat_speech_"))
+    suffix = Path(file.filename or "input.wav").suffix or ".wav"
+    input_path = work_dir / f"input{suffix}"
+    speech_path = work_dir / "translation_speech.wav"
+
+    try:
+        input_path.write_bytes(await file.read())
+        result = _translate_file(input_path, sr)
+        speak_text(
+            result["translation"],
+            output_path=str(speech_path),
+            rate=tts_rate,
+            voice=voice,
+        )
+    except TextToSpeechError as exc:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+
+    background_tasks.add_task(shutil.rmtree, work_dir, ignore_errors=True)
+    headers = {
+        "X-Cat-Intent": result["intent"],
+        "X-Cat-Confidence": str(result["confidence"]),
+        "X-Cat-Translation": result["translation"],
+    }
+    return FileResponse(
+        speech_path,
+        media_type="audio/wav",
+        filename="translation_speech.wav",
         headers=headers,
         background=background_tasks,
     )

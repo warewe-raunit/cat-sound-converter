@@ -7,6 +7,8 @@ import warnings
 warnings.filterwarnings("ignore")
 import numpy as np
 
+from engine.audio_io import sanitize_audio, validate_sample_rate
+
 
 def _pitch_direction(f0: np.ndarray) -> str:
     if len(f0) < 4:
@@ -29,6 +31,11 @@ def analyze(y: np.ndarray, sr: int) -> list[dict]:
     Returns list sorted by start time.
     """
     import librosa
+
+    sr = validate_sample_rate(sr)
+    y = sanitize_audio(y)
+    if len(y) == 0:
+        return []
 
     hop = 256
     frame_len = 512

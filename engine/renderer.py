@@ -19,9 +19,11 @@ from engine.dsp import (
 )
 from engine.emotion_presets import PRESETS, STYLE_SCALES, infer_emotion
 from engine.curated_dataset import CuratedDataset
+from engine.audio_io import validate_sample_rate
 
 
 def _silence(sr: int, dur_s: float) -> np.ndarray:
+    sr = validate_sample_rate(sr)
     n = max(0, int(dur_s * sr))
     return np.zeros(n, dtype=np.float32)
 
@@ -43,6 +45,7 @@ def _render_one(
     target_dur: float,
 ) -> np.ndarray:
     """Apply the full DSP chain for one vocal event."""
+    sr = validate_sample_rate(sr)
     p = PRESETS[emotion]
     s = STYLE_SCALES.get(style, STYLE_SCALES["natural"])
 
@@ -116,6 +119,7 @@ def render(
     Render all prosody segments to cat audio.
     Pause durations from the input are preserved (scaled by tempo_scale).
     """
+    sr = validate_sample_rate(sr)
     if not segments:
         return _silence(sr, 1.0)
 

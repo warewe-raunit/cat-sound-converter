@@ -10,6 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
+from engine.audio_io import validate_sample_rate
+
 # Fallback priority when a requested character has no clips
 _FALLBACK_ORDER = [
     "neutral_attention",
@@ -24,7 +26,7 @@ _FALLBACK_ORDER = [
 class CuratedDataset:
     def __init__(self, dataset_dir: str, sr: int = 22050):
         self.dir = Path(dataset_dir)
-        self.sr = sr
+        self.sr = validate_sample_rate(sr)
         self._cache: dict[str, np.ndarray] = {}
         self._cursors: dict[str, int] = defaultdict(int)
 
