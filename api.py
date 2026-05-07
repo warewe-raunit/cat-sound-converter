@@ -6,14 +6,27 @@ Run:
 """
 from __future__ import annotations
 
+import os
+import secrets
 import shutil
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Security,
+    UploadFile,
+)
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from engine.audio_io import AudioDecodeError, load_audio, save_audio, validate_sample_rate
@@ -27,6 +40,7 @@ from engine.tts import ALLOWED_VOICES, DEFAULT_VOICE, TextToSpeechError, speak_t
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATASET = ROOT / "curated_cat_sounds"
 STYLES = {"natural", "expressive", "subtle"}
+TOKEN_ENV_NAMES = ("CAT_API_TOKEN", "API_TOKEN")
 
 STYLE_OPTIONS = sorted(STYLES)
 STYLE_DESCRIPTION = (
@@ -58,6 +72,10 @@ TTS_RATE_DESCRIPTION = (
     "Speech speed in words per minute for the returned translation audio. "
     "Valid range: 80 to 260. Recommended value: 150."
 )
+AUTH_DESCRIPTION = (
+    "Protected endpoints require an HTTP bearer token. Set CAT_API_TOKEN on the server, "
+    "then send requests with the header: Authorization: Bearer <your-token>."
+)
 
 API_DESCRIPTION = """
 Interactive API for the Cat Vocalization Engine.
@@ -71,6 +89,12 @@ Use the endpoints below to:
 
 The translation is an acoustic interpretation, not a literal cat language decoder.
 For best results, upload short and clear clips with audible vocal segments.
+
+Authentication:
+
+* `/health` is public so Docker and load balancers can check readiness.
+* Audio render and translation endpoints require `Authorization: Bearer <token>`.
+* In Swagger, click **Authorize** and paste the token configured in `CAT_API_TOKEN`.
 """
 
 OPENAPI_TAGS = [
@@ -92,6 +116,12 @@ OPENAPI_TAGS = [
     },
 ]
 
+bearer_auth = HTTPBearer(
+    scheme_name="Bearer token",
+    description=AUTH_DESCRIPTION,
+    auto_error=False,
+)
+
 
 class ErrorResponse(BaseModel):
     detail: str = Field(
@@ -111,6 +141,38 @@ class ErrorResponse(BaseModel):
     )
 
 
+AUTH_REQUIRED_RESPONSE = {
+    "model": ErrorResponse,
+    "description": "Missing, invalid, or unconfigured bearer token.",
+    "headers": {
+        "WWW-Authenticate": {
+            "description": "Bearer challenge returned when authentication fails.",
+            "schema": {"type": "string", "example": "Bearer"},
+        }
+    },
+    "content": {
+        "application/json": {
+            "examples": {
+                "missingToken": {
+                    "summary": "No bearer token sent",
+                    "value": {
+                        "detail": "Missing API token. Send Authorization: Bearer <token>."
+                    },
+                },
+                "invalidToken": {
+                    "summary": "Bearer token does not match the server secret",
+                    "value": {"detail": "Invalid API token."},
+                },
+                "notConfigured": {
+                    "summary": "Server token has not been configured",
+                    "value": {"detail": "API token is not configured on the server."},
+                },
+            }
+        }
+    },
+}
+
+
 class HealthResponse(BaseModel):
     ok: bool = Field(..., description="True when the API process is running.")
     features: list[str] = Field(
@@ -127,6 +189,10 @@ class HealthResponse(BaseModel):
         ...,
         description="True when the bundled dataset directory exists on the server.",
     )
+    authentication_enabled: bool = Field(
+        ...,
+        description="True when CAT_API_TOKEN or API_TOKEN is configured for protected endpoints.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -140,6 +206,7 @@ class HealthResponse(BaseModel):
                     ],
                     "default_dataset": str(DEFAULT_DATASET),
                     "dataset_exists": True,
+                    "authentication_enabled": True,
                 }
             ]
         }
@@ -456,6 +523,41 @@ def _dataset_path(dataset: str | None) -> Path:
     return path
 
 
+def _configured_api_token() -> str | None:
+    for name in TOKEN_ENV_NAMES:
+        token = os.getenv(name)
+        if token:
+            return token
+    return None
+
+
+def require_api_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_auth),
+) -> None:
+    expected_token = _configured_api_token()
+    if not expected_token:
+        raise HTTPException(
+            status_code=401,
+            detail="API token is not configured on the server.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API token. Send Authorization: Bearer <token>.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if credentials.scheme.lower() != "bearer" or not secrets.compare_digest(
+        credentials.credentials,
+        expected_token,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 def _validate_style(style: str) -> str:
     if style not in STYLES:
         raise HTTPException(
@@ -560,6 +662,7 @@ def health() -> dict:
         "features": ["audio_to_cat", "cat_audio_to_human", "cat_audio_to_human_speech"],
         "default_dataset": str(DEFAULT_DATASET),
         "dataset_exists": DEFAULT_DATASET.exists(),
+        "authentication_enabled": _configured_api_token() is not None,
     }
 
 
@@ -660,10 +763,12 @@ def index() -> str:
     response_class=FileResponse,
     responses={
         200: RENDER_AUDIO_RESPONSE,
+        401: AUTH_REQUIRED_RESPONSE,
         400: BAD_REQUEST_RESPONSE,
         415: DECODE_ERROR_RESPONSE,
         422: NO_SEGMENTS_RESPONSE,
     },
+    dependencies=[Depends(require_api_token)],
 )
 async def render_upload(
     background_tasks: BackgroundTasks,
@@ -729,10 +834,12 @@ async def render_upload(
     response_class=FileResponse,
     responses={
         200: RENDER_AUDIO_RESPONSE,
+        401: AUTH_REQUIRED_RESPONSE,
         400: BAD_REQUEST_RESPONSE,
         415: DECODE_ERROR_RESPONSE,
         422: NO_SEGMENTS_RESPONSE,
     },
+    dependencies=[Depends(require_api_token)],
 )
 def render_demo(
     background_tasks: BackgroundTasks,
@@ -796,10 +903,12 @@ def render_demo(
     response_model=CatTranslationResponse,
     response_description="Best-effort text interpretation with per-segment acoustic details.",
     responses={
+        401: AUTH_REQUIRED_RESPONSE,
         400: BAD_REQUEST_RESPONSE,
         415: DECODE_ERROR_RESPONSE,
         422: NO_SEGMENTS_RESPONSE,
     },
+    dependencies=[Depends(require_api_token)],
 )
 async def translate_cat_upload(
     file: UploadFile = File(..., description=CAT_AUDIO_DESCRIPTION),
@@ -835,11 +944,13 @@ async def translate_cat_upload(
     response_class=FileResponse,
     responses={
         200: SPEECH_AUDIO_RESPONSE,
+        401: AUTH_REQUIRED_RESPONSE,
         400: BAD_REQUEST_RESPONSE,
         415: DECODE_ERROR_RESPONSE,
         422: NO_SEGMENTS_RESPONSE,
         503: TTS_UNAVAILABLE_RESPONSE,
     },
+    dependencies=[Depends(require_api_token)],
 )
 async def translate_cat_speech_upload(
     background_tasks: BackgroundTasks,
