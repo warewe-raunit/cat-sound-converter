@@ -23,6 +23,11 @@ _FALLBACK_ORDER = [
 ]
 
 
+def _normalize_metadata_path(path: str) -> str:
+    """Return a platform-neutral relative path from metadata."""
+    return path.replace("\\", "/").lstrip("/")
+
+
 class CuratedDataset:
     def __init__(self, dataset_dir: str, sr: int = 22050):
         self.dir = Path(dataset_dir)
@@ -40,13 +45,15 @@ class CuratedDataset:
         self._by_char: dict[str, list[dict]] = defaultdict(list)
         skipped_missing: list[str] = []
         for entry in metadata:
-            rel_path = entry.get("file")
+            rel_path = _normalize_metadata_path(entry.get("file", ""))
             character = entry.get("character")
             if not rel_path or not character:
                 continue
             if not (self.dir / rel_path).exists():
                 skipped_missing.append(rel_path)
                 continue
+            entry = dict(entry)
+            entry["file"] = rel_path
             self._by_char[entry["character"]].append(entry)
 
         if not self._by_char:
